@@ -1,0 +1,244 @@
+import numpy as np 
+import matplotlib.pyplot as plt
+import glob
+import cv2
+import os
+from sklearn.preprocessing import LabelEncoder
+from keras.utils import to_categorical
+from keras.models import Model
+from keras.applications.vgg16 import VGG16
+from keras.layers import Dense, Dropout,  GlobalAveragePooling2D
+from keras.optimizers import Adam
+SIZE = 256  #Resize images
+# Function to load and preprocess images
+def load_images_and_labels(directory):
+    images = []
+    main_labels = []
+    sub_labels = []
+
+    for main_dir in glob.glob(os.path.join(directory, "*")):
+        main_label = os.path.basename(main_dir)  # Main class label
+        for sub_dir in os.listdir(main_dir):  # Iterate over subdirectories (subclass labels)
+            sub_label = sub_dir
+            for img_path in glob.glob(os.path.join(main_dir, sub_dir, "*.jpg")):
+                img = cv2.imread(img_path, cv2.IMREAD_COLOR)
+                img = cv2.resize(img, (SIZE, SIZE))
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                images.append(img)
+                main_labels.append(main_label)
+                sub_labels.append(sub_label)
+
+    return np.array(images), np.array(main_labels), np.array(sub_labels)
+# Load train, test, and valid datasets
+train_images, train_labels, train_subclass_labels = load_images_and_labels("Dataset/train")
+test_images, test_labels, test_subclass_labels = load_images_and_labels("Dataset/test")
+valid_images, valid_labels, valid_subclass_labels = load_images_and_labels("Dataset/valid")
+# Normalize images
+train_images = train_images / 255.0
+test_images = test_images / 255.0
+valid_images = valid_images / 255.0
+
+# Encode labels
+le_main = LabelEncoder()
+y_train_main = le_main.fit_transform(train_labels)
+y_test_main = le_main.transform(test_labels)
+y_valid_main = le_main.transform(valid_labels)
+le_subclass = LabelEncoder()
+y_train_subclass = le_subclass.fit_transform(train_subclass_labels)
+y_test_subclass = le_subclass.transform(test_subclass_labels)
+y_valid_subclass = le_subclass.transform(valid_subclass_labels)
+
+# One-hot encode labels for neural network compatibility (if needed)
+y_train_main_one_hot = to_categorical(y_train_main)
+y_test_main_one_hot = to_categorical(y_test_main)
+y_valid_main_one_hot = to_categorical(y_valid_main)
+
+y_train_subclass_one_hot = to_categorical(y_train_subclass)
+y_test_subclass_one_hot = to_categorical(y_test_subclass)
+y_valid_subclass_one_hot = to_categorical(y_valid_subclass)
+# Check the shapes of loaded images and labels
+print(f"Shape of train_images: {train_images.shape}")
+print(f"Shape of y_train_main_one_hot: {y_train_main_one_hot.shape}")
+print(f"Shape of y_train_subclass_one_hot: {y_train_subclass_one_hot.shape}")
+
+print(f"Shape of test_images: {test_images.shape}")
+print(f"Shape of y_test_main_one_hot: {y_test_main_one_hot.shape}")
+print(f"Shape of y_test_subclass_one_hot: {y_test_subclass_one_hot.shape}")
+
+print(f"Shape of valid_images: {valid_images.shape}")
+print(f"Shape of y_valid_main_one_hot: {y_valid_main_one_hot.shape}")
+print(f"Shape of y_valid_subclass_one_hot: {y_valid_subclass_one_hot.shape}")
+
+base_model = VGG16(weights='imagenet', include_top=False, input_shape=(SIZE, SIZE, 3))
+
+# Add a new classification head for main class and subclass
+x = base_model.output
+x = GlobalAveragePooling2D()(x)
+x = Dense(1024, activation='relu')(x)
+x = Dropout(0.5)(x)
+main_class_output = Dense(len(le_main.classes_), activation='softmax', name='main_class_output')(x)
+subclass_output = Dense(len(le_subclass.classes_), activation='softmax', name='subclass_output')(x)
+# Create the model
+model = Model(inputs=base_model.input, outputs=[main_class_output, subclass_output])
+
+# Freeze the VGG16 base model layers
+for layer in base_model.layers:
+    layer.trainable = False
+# Compile the model
+model.compile(optimizer=Adam(learning_rate=1e-4),
+              loss={'main_class_output': 'categorical_crossentropy', 'subclass_output': 'categorical_crossentropy'},
+              metrics={'main_class_output': 'accuracy', 'subclass_output': 'accuracy'})
+# Train the model
+history = model.fit(train_images, {'main_class_output': y_train_main_one_hot, 'subclass_output': y_train_subclass_one_hot},
+                    epochs=5,
+                    batch_size=32,
+                    validation_data=(valid_images, {'main_class_output': y_valid_main_one_hot, 'subclass_output': y_valid_subclass_one_hot}),
+                    verbose=1)
+# Calculate training accuracy
+train_results = model.evaluate(train_images, {'main_class_output': y_train_main_one_hot, 'subclass_output': y_train_subclass_one_hot})
+print("Training results:", train_results)
+
+# Unpack the results correctly based on the length of train_results
+if len(train_results) == 3:
+    train_loss, train_main_class_accuracy, train_subclass_accuracy = train_results
+    train_main_class_loss = "Not returned"
+    train_subclass_loss = "Not returned"
+elif len(train_results) == 5:
+    train_loss, train_main_class_loss, train_subclass_loss, train_main_class_accuracy, train_subclass_accuracy = train_results
+else:
+    raise ValueError("Unexpected number of elements in train_results")
+
+print(f"Training Accuracy (Main Class): {train_main_class_accuracy}")
+print(f"Training Accuracy (Subclass): {train_subclass_accuracy}")
+# Evaluate the model on the test set
+valid_results = model.evaluate(valid_images, {'main_class_output': y_valid_main_one_hot, 'subclass_output': y_valid_subclass_one_hot})
+print("valid results:", valid_results)
+
+# Unpack the results correctly based on the length of test_results
+if len(valid_results) == 3:
+    valid_loss, valid_main_class_accuracy, valid_subclass_accuracy = valid_results
+    valid_main_class_loss = "Not returned"
+    valid_subclass_loss = "Not returned"
+elif len(valid_results) == 5:
+    test_loss, test_main_class_loss, test_subclass_loss, test_main_class_accuracy, test_subclass_accuracy = valid_results
+else:
+    raise ValueError("Unexpected number of elements in test_results")
+
+print(f"valid Accuracy (Main Class): {valid_main_class_accuracy}")
+print(f"valid Accuracy (Subclass): {valid_subclass_accuracy}")
+# Evaluate the model on the test set
+test_results = model.evaluate(test_images, {'main_class_output': y_test_main_one_hot, 'subclass_output': y_test_subclass_one_hot})
+print("Test results:", test_results)
+
+# Unpack the results correctly based on the length of test_results
+if len(test_results) == 3:
+    test_loss, test_main_class_accuracy, test_subclass_accuracy = test_results
+    test_main_class_loss = "Not returned"
+    test_subclass_loss = "Not returned"
+elif len(test_results) == 5:
+    test_loss, test_main_class_loss, test_subclass_loss, test_main_class_accuracy, test_subclass_accuracy = test_results
+else:
+    raise ValueError("Unexpected number of elements in test_results")
+
+print(f"Test Accuracy (Main Class): {test_main_class_accuracy}")
+print(f"Test Accuracy (Subclass): {test_subclass_accuracy}")
+from sklearn.metrics import f1_score
+# Predictions on the test set
+predictions = model.predict(test_images)
+
+# Check if predictions is a list or array and handle accordingly
+if isinstance(predictions, list):
+    pred_main_class = np.argmax(predictions[0], axis=1)
+    pred_subclass = np.argmax(predictions[1], axis=1)
+else:
+    raise ValueError("Unexpected predictions format. Expected a list.")
+
+# Convert one-hot encoded test labels back to integer labels
+true_main_class = np.argmax(y_test_main_one_hot, axis=1)
+true_subclass = np.argmax(y_test_subclass_one_hot, axis=1)
+
+from sklearn.metrics import f1_score, precision_score, recall_score
+# Predictions on the test set
+predictions = model.predict(test_images)
+
+# Check if predictions is a list or array and handle accordingly
+if isinstance(predictions, list):
+    pred_main_class = np.argmax(predictions[0], axis=1)
+    pred_subclass = np.argmax(predictions[1], axis=1)
+else:
+    raise ValueError("Unexpected predictions format. Expected a list.")
+
+# Convert one-hot encoded test labels back to integer labels
+true_main_class = np.argmax(y_test_main_one_hot, axis=1)
+true_subclass = np.argmax(y_test_subclass_one_hot, axis=1)
+
+# Calculate precision, recall, and F1 scores
+precision_main_class = precision_score(true_main_class, pred_main_class, average='weighted')
+recall_main_class = recall_score(true_main_class, pred_main_class, average='weighted')
+f1_main_class = f1_score(true_main_class, pred_main_class, average='weighted')
+
+precision_subclass = precision_score(true_subclass, pred_subclass, average='weighted')
+recall_subclass = recall_score(true_subclass, pred_subclass, average='weighted')
+f1_subclass = f1_score(true_subclass, pred_subclass, average='weighted')
+
+print(f"Precision (Main Class): {precision_main_class}")
+print(f"Recall (Main Class): {recall_main_class}")
+print(f"F1 Score (Main Class): {f1_main_class}")
+
+print(f"Precision (Subclass): {precision_subclass}")
+print(f"Recall (Subclass): {recall_subclass}")
+print(f"F1 Score (Subclass): {f1_subclass}")
+import matplotlib.pyplot as plt
+
+# Function to plot actual vs predicted values
+def plot_actual_vs_predicted(true_labels, predicted_labels, title, label_encoder):
+    plt.figure(figsize=(10, 6))
+    
+    true_labels_decoded = label_encoder.inverse_transform(true_labels)
+    predicted_labels_decoded = label_encoder.inverse_transform(predicted_labels)
+    
+    plt.plot(true_labels_decoded, label='Actual', color='blue', marker='o')
+    plt.plot(predicted_labels_decoded, label='Predicted', color='red', linestyle='dashed', marker='x')
+    
+    plt.xlabel('Sample Index')
+    plt.ylabel('Labels')
+    plt.title(title)
+    plt.legend()
+    plt.xticks(rotation=90)
+    plt.tight_layout()
+    plt.show()
+
+# Plot actual vs predicted for main class labels
+plot_actual_vs_predicted(true_main_class, pred_main_class, 'Main Class: Actual vs Predicted', le_main)
+
+# Plot actual vs predicted for subclass labels
+plot_actual_vs_predicted(true_subclass, pred_subclass, 'Subclass: Actual vs Predicted', le_subclass)
+def predict_image(image_path):
+    random_image = cv2.imread(image_path)
+    random_image = cv2.cvtColor(random_image, cv2.COLOR_BGR2RGB)
+    preprocessed_image = cv2.resize(random_image, (SIZE, SIZE))
+    preprocessed_image = np.expand_dims(preprocessed_image, axis=0)
+    preprocessed_image = preprocessed_image / 255.0
+
+    # Predict main class and subclass
+    predictions = model.predict(preprocessed_image)
+    main_class_pred = np.argmax(predictions[0], axis=1)[0]
+    sub_class_pred = np.argmax(predictions[1], axis=1)[0]
+
+    # Decode predictions to original labels
+    main_class_pred = le_main.inverse_transform([main_class_pred])[0]
+    sub_class_pred = le_subclass.inverse_transform([sub_class_pred])[0]
+
+    print('Maturity Status:', main_class_pred)
+    print('Quality Status:', sub_class_pred)
+
+    # Display the image with predictions and decision
+    plt.imshow(random_image)
+    plt.title(f'Maturity: {main_class_pred}, Quality: {sub_class_pred}')
+    plt.axis('off')
+    plt.show()
+
+# Example usage:
+image_path = 'un2.jpg'  # Replace with the path to your image
+predict_image(image_path)
+    
